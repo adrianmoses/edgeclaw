@@ -7,7 +7,7 @@ let mf: Miniflare;
 
 beforeAll(async () => {
   // worker-build output lives in build/worker/shim.mjs
-  const workerPath = resolve(__dirname, "../../build/worker/shim.mjs");
+  const workerPath = resolve(__dirname, "../../crates/edgeclaw-worker/build/worker/shim.mjs");
   const script = readFileSync(workerPath, "utf-8");
 
   mf = new Miniflare({

@@ -86,7 +86,7 @@ jobs:
         run: npm install
 
       - name: Build worker
-        run: cargo install -q worker-build && worker-build --release
+        run: cargo install -q worker-build && worker-build --release crates/edgeclaw-worker
 
       - name: Run integration tests
         run: npm test

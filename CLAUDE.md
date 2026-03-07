@@ -19,7 +19,7 @@ cargo clippy -p edgeclaw-worker --target wasm32-unknown-unknown -- -D warnings
 cargo fmt --all -- --check
 
 # Build worker for deployment/integration tests
-cargo install worker-build && worker-build --release
+cargo install worker-build && worker-build --release crates/edgeclaw-worker
 
 # Integration tests
 npm test
@@ -43,7 +43,7 @@ npm test
 ## Testing Patterns
 
 - **Unit tests**: `MockHttpBackend` with `RefCell<VecDeque<Vec<u8>>>` for pre-recorded API responses. Fixtures in `tests/fixtures/`.
-- **Integration tests**: Miniflare + Vitest in `tests/integration/`. Requires `worker-build --release` first.
+- **Integration tests**: Miniflare + Vitest in `tests/integration/`. Requires `worker-build --release crates/edgeclaw-worker` first.
 
 ## Durable Object Identity
 

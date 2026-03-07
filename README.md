@@ -41,7 +41,7 @@ cargo test --workspace
 
 # Integration tests (requires worker build)
 cargo install worker-build
-worker-build --release
+worker-build --release crates/edgeclaw-worker
 npm install
 npm test
 ```
