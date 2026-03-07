@@ -144,17 +144,100 @@ impl<H: HttpBackend> LlmClient<H> {
 
         let response_bytes = self.backend.post(&url, &headers, &body).await?;
 
-        // Try to parse as success, fall back to error
-        if let Ok(api_error) = serde_json::from_slice::<ApiError>(&response_bytes) {
-            return Err(AgentError::LlmRequestFailed(api_error.error.message));
-        }
-
-        let api_response: ApiResponse = serde_json::from_slice(&response_bytes)
-            .map_err(|e| AgentError::LlmResponseParse(e.to_string()))?;
+        // Try success first (has required `content` + `stop_reason` fields),
+        // then fall back to error parsing. This avoids false positives from
+        // lenient deserialization of ApiError against valid responses.
+        let api_response: ApiResponse = match serde_json::from_slice(&response_bytes) {
+            Ok(resp) => resp,
+            Err(_) => {
+                if let Ok(api_error) = serde_json::from_slice::<ApiError>(&response_bytes) {
+                    return Err(AgentError::LlmRequestFailed(api_error.error.message));
+                }
+                return Err(AgentError::LlmResponseParse(
+                    String::from_utf8_lossy(&response_bytes).into_owned(),
+                ));
+            }
+        };
 
         Ok(LlmResponse {
             stop_reason: api_response.stop_reason,
             content: api_response.content,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::AgentError;
+    use std::cell::RefCell;
+
+    struct MockBackend {
+        response: RefCell<Option<Vec<u8>>>,
+    }
+
+    impl MockBackend {
+        fn new(response: &str) -> Self {
+            Self {
+                response: RefCell::new(Some(response.as_bytes().to_vec())),
+            }
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl HttpBackend for MockBackend {
+        async fn post(
+            &self,
+            _url: &str,
+            _headers: &[(&str, &str)],
+            _body: &[u8],
+        ) -> Result<Vec<u8>, AgentError> {
+            self.response
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| AgentError::Http("No response".to_string()))
+        }
+    }
+
+    fn make_client(response: &str) -> LlmClient<MockBackend> {
+        let config = LlmConfig {
+            api_key: "test-key".to_string(),
+            ..LlmConfig::default()
+        };
+        LlmClient::new(config, MockBackend::new(response))
+    }
+
+    #[tokio::test]
+    async fn test_send_message_success() {
+        let fixture = include_str!("../../../tests/fixtures/end_turn_response.json");
+        let client = make_client(fixture);
+        let result = client.send_message("system", &[], &[]).await.unwrap();
+
+        assert!(matches!(result.stop_reason, StopReason::EndTurn));
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            ContentBlock::Text { text } => {
+                assert_eq!(text, "Hello! How can I help you today?");
+            }
+            _ => panic!("Expected Text content block"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_message_api_error() {
+        let fixture = include_str!("../../../tests/fixtures/api_error_response.json");
+        let client = make_client(fixture);
+        let err = client.send_message("system", &[], &[]).await.unwrap_err();
+
+        assert!(
+            matches!(err, AgentError::LlmRequestFailed(ref msg) if msg.contains("credit balance"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_message_invalid_json() {
+        let client = make_client("not valid json at all");
+        let err = client.send_message("system", &[], &[]).await.unwrap_err();
+        assert!(matches!(err, AgentError::LlmResponseParse(_)));
     }
 }

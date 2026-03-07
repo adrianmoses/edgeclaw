@@ -68,3 +68,25 @@ jobs:
 
       - name: Clippy edgeclaw-worker (wasm32)
         run: cargo clippy -p edgeclaw-worker --target wasm32-unknown-unknown -- -D warnings
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Node dependencies
+        run: npm install
+
+      - name: Build worker
+        run: cargo install -q worker-build && worker-build --release
+
+      - name: Run integration tests
+        run: npm test
