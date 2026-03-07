@@ -1,18 +1,22 @@
 import { Miniflare } from "miniflare";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { readFileSync } from "fs";
 import { resolve } from "path";
 
 let mf: Miniflare;
 
 beforeAll(async () => {
-  // worker-build output lives in build/worker/shim.mjs
-  const workerPath = resolve(__dirname, "../../crates/edgeclaw-worker/build/worker/shim.mjs");
-  const script = readFileSync(workerPath, "utf-8");
+  const scriptPath = resolve(
+    __dirname,
+    "../../crates/edgeclaw-worker/build/worker/shim.mjs",
+  );
 
   mf = new Miniflare({
     modules: true,
-    script,
+    scriptPath,
+    modulesRules: [
+      { type: "ESModule", include: ["**/*.js"] },
+      { type: "CompiledWasm", include: ["**/*.wasm"] },
+    ],
     durableObjects: {
       AGENT_DO: "AgentDo",
     },
