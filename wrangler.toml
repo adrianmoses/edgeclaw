@@ -1,9 +1,9 @@
 name = "edgeclaw"
-main = "build/worker/shim.mjs"
+main = "crates/edgeclaw-worker/build/worker/shim.mjs"
 compatibility_date = "2026-01-01"
 
 [build]
-command = "cargo install -q worker-build && worker-build --release"
+command = "cargo install -q worker-build && worker-build --release crates/edgeclaw-worker"
 
 [[durable_objects.bindings]]
 name = "AGENT_DO"

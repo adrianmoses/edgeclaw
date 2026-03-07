@@ -188,3 +188,128 @@ fn now_epoch() -> i64 {
     // For now return 0 as a placeholder — the DO layer will set real timestamps.
     0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::{HttpBackend, LlmClient, LlmConfig};
+    use async_trait::async_trait;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    struct MockHttpBackend {
+        responses: RefCell<VecDeque<Vec<u8>>>,
+    }
+
+    impl MockHttpBackend {
+        fn new(responses: Vec<Vec<u8>>) -> Self {
+            Self {
+                responses: RefCell::new(responses.into()),
+            }
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl HttpBackend for MockHttpBackend {
+        async fn post(
+            &self,
+            _url: &str,
+            _headers: &[(&str, &str)],
+            _body: &[u8],
+        ) -> Result<Vec<u8>, AgentError> {
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AgentError::Http("No more mock responses".to_string()))
+        }
+    }
+
+    fn make_agent(responses: Vec<&str>) -> Agent<MockHttpBackend> {
+        let backend = MockHttpBackend::new(
+            responses
+                .into_iter()
+                .map(|s| s.as_bytes().to_vec())
+                .collect(),
+        );
+        let config = LlmConfig {
+            api_key: "test-key".to_string(),
+            ..LlmConfig::default()
+        };
+        Agent::new(LlmClient::new(config, backend))
+    }
+
+    fn empty_ctx() -> AgentContext {
+        AgentContext {
+            system_prompt: "You are helpful.".to_string(),
+            messages: vec![],
+            tools: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_end_turn() {
+        let fixture = include_str!("../../../tests/fixtures/end_turn_response.json");
+        let agent = make_agent(vec![fixture]);
+        let result = agent.run(empty_ctx(), "Hi").await.unwrap();
+
+        assert_eq!(
+            result.answer,
+            Some("Hello! How can I help you today?".to_string())
+        );
+        assert_eq!(result.new_messages.len(), 2); // user msg + assistant msg
+        assert!(result.pending_tool_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_tool_use() {
+        let fixture = include_str!("../../../tests/fixtures/tool_use_response.json");
+        let agent = make_agent(vec![fixture]);
+        let result = agent
+            .run(empty_ctx(), "Search for Rust WASM")
+            .await
+            .unwrap();
+
+        assert!(result.answer.is_none());
+        assert_eq!(result.pending_tool_calls.len(), 1);
+        assert_eq!(result.pending_tool_calls[0].name, "web_search");
+        assert_eq!(result.pending_tool_calls[0].id, "toolu_01A");
+    }
+
+    #[tokio::test]
+    async fn test_resume_after_tool_result() {
+        let end_turn = include_str!("../../../tests/fixtures/end_turn_response.json");
+        let tool_use = include_str!("../../../tests/fixtures/tool_use_response.json");
+        let agent = make_agent(vec![tool_use, end_turn]);
+
+        // First run triggers tool use
+        let result = agent.run(empty_ctx(), "Search something").await.unwrap();
+        assert!(result.answer.is_none());
+
+        // Resume with tool results
+        let mut ctx = empty_ctx();
+        // Rebuild context as the DO would: prior messages + assistant tool_use msg
+        ctx.messages = result.new_messages.clone();
+
+        let tool_results = vec![ToolResult {
+            tool_use_id: "toolu_01A".to_string(),
+            content: "Search results here".to_string(),
+            is_error: false,
+        }];
+
+        let result = agent.resume(ctx, tool_results).await.unwrap();
+        assert_eq!(
+            result.answer,
+            Some("Hello! How can I help you today?".to_string())
+        );
+        assert!(result.pending_tool_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_max_tokens_error() {
+        let response =
+            r#"{"content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens"}"#;
+        let agent = make_agent(vec![response]);
+        let err = agent.run(empty_ctx(), "Hi").await.unwrap_err();
+        assert!(matches!(err, AgentError::UnexpectedStopReason(ref s) if s == "max_tokens"));
+    }
+}

@@ -51,6 +51,12 @@ impl HttpBackend for WorkerFetchBackend {
 #[event(fetch)]
 async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let url = req.url()?;
+    let path = req.path();
+
+    // POST /orchestrate — multi-agent fan-out (M1.7)
+    if req.method() == Method::Post && path.as_str() == "/orchestrate" {
+        return handle_orchestrate(req, &env).await;
+    }
 
     // Extract user ID from X-User-Id header or query param for local testing
     let user_id = req.headers().get("X-User-Id").ok().flatten().or_else(|| {
@@ -77,6 +83,46 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
     // Forward the request to the DO
     stub.fetch_with_request(req).await
+}
+
+// --- Multi-Agent Orchestration (M1.7) ---
+
+#[derive(Deserialize)]
+struct OrchestrateRequest {
+    task: String,
+    agents: Vec<String>,
+}
+
+async fn handle_orchestrate(mut req: Request, env: &Env) -> Result<Response> {
+    let body: OrchestrateRequest = req.json().await?;
+    let namespace = env.durable_object("AGENT_DO")?;
+
+    let mut results = serde_json::Map::new();
+
+    // Sequential fan-out: send the task to each named agent
+    for agent_name in &body.agents {
+        let stub = namespace
+            .id_from_name(&format!("agent:{agent_name}"))?
+            .get_stub()?;
+
+        let message_body = serde_json::json!({ "message": body.task });
+
+        let mut init = RequestInit::new();
+        init.method = Method::Post;
+        init.body = Some(wasm_bindgen::JsValue::from_str(
+            &serde_json::to_string(&message_body).map_err(|e| Error::RustError(e.to_string()))?,
+        ));
+        init.headers
+            .set("content-type", "application/json")
+            .map_err(|e| Error::RustError(format!("{e:?}")))?;
+
+        let inner_req = Request::new_with_init("https://fake-host/message", &init)?;
+        let mut resp = stub.fetch_with_request(inner_req).await?;
+        let value: serde_json::Value = resp.json().await?;
+        results.insert(agent_name.clone(), value);
+    }
+
+    Response::from_json(&results)
 }
 
 // --- AgentDO Durable Object ---
@@ -160,12 +206,9 @@ impl AgentDo {
 
     fn load_messages(&self, limit: u32) -> Vec<Message> {
         let sql = self.state.storage().sql();
-        let none: Option<Vec<SqlStorageValue>> = None;
         let cursor = match sql.exec(
-            &format!(
-                "SELECT role, content, created_at FROM messages ORDER BY id DESC LIMIT {limit}"
-            ),
-            none,
+            "SELECT role, content, created_at FROM messages ORDER BY id DESC LIMIT ?",
+            Some(vec![SqlStorageValue::Integer(limit as i64)]),
         ) {
             Ok(c) => c,
             Err(_) => return vec![],
@@ -251,13 +294,8 @@ impl AgentDo {
             .unwrap_or_else(|| "You are a helpful AI assistant.".to_string())
     }
 
-    async fn handle_message(&self, mut req: Request) -> Result<Response> {
-        #[derive(Deserialize)]
-        struct MessageRequest {
-            message: String,
-        }
-
-        let body: MessageRequest = req.json().await?;
+    /// Shared agent turn logic used by both HTTP and WebSocket handlers.
+    async fn run_agent_turn(&self, user_message: &str) -> Result<serde_json::Value> {
         let config = self.build_llm_config();
         let llm = LlmClient::new(config, WorkerFetchBackend);
         let agent = Agent::new(llm);
@@ -272,23 +310,38 @@ impl AgentDo {
         };
 
         let result = agent
-            .run(ctx, &body.message)
+            .run(ctx, user_message)
             .await
             .map_err(|e| Error::RustError(e.to_string()))?;
 
         self.persist_messages(&result.new_messages);
 
-        let response_body = serde_json::json!({
+        Ok(serde_json::json!({
             "answer": result.answer,
             "pending_tool_calls": result.pending_tool_calls,
-        });
+        }))
+    }
 
+    async fn handle_message(&self, mut req: Request) -> Result<Response> {
+        #[derive(Deserialize)]
+        struct MessageRequest {
+            message: String,
+        }
+
+        let body: MessageRequest = req.json().await?;
+        let response_body = self.run_agent_turn(&body.message).await?;
         Response::from_json(&response_body)
     }
 
     fn handle_history(&self) -> Result<Response> {
         let messages = self.load_messages(50);
         Response::from_json(&messages)
+    }
+
+    fn handle_websocket_upgrade(&self) -> Result<Response> {
+        let pair = WebSocketPair::new()?;
+        self.state.accept_web_socket(&pair.server);
+        Response::from_websocket(pair.client)
     }
 }
 
@@ -310,7 +363,73 @@ impl DurableObject for AgentDo {
         match (method, path.as_str()) {
             (Method::Post, "/message") => self.handle_message(req).await,
             (Method::Get, "/history") => self.handle_history(),
+            (Method::Get, "/") => {
+                // Check for WebSocket upgrade
+                let upgrade = req.headers().get("Upgrade").ok().flatten();
+                if upgrade.as_deref() == Some("websocket") {
+                    self.handle_websocket_upgrade()
+                } else {
+                    Response::error("Expected WebSocket upgrade", 426)
+                }
+            }
             _ => Response::error("Not Found", 404),
         }
+    }
+
+    async fn websocket_message(
+        &self,
+        ws: WebSocket,
+        message: WebSocketIncomingMessage,
+    ) -> Result<()> {
+        self.ensure_schema();
+
+        let text = match message {
+            WebSocketIncomingMessage::String(s) => s,
+            WebSocketIncomingMessage::Binary(_) => {
+                ws.send_with_str(r#"{"error":"binary messages not supported"}"#)?;
+                return Ok(());
+            }
+        };
+
+        // Parse as JSON: { "message": "..." }
+        #[derive(Deserialize)]
+        struct WsMessage {
+            message: String,
+        }
+
+        let parsed: WsMessage = match serde_json::from_str(&text) {
+            Ok(m) => m,
+            Err(e) => {
+                let err = serde_json::json!({ "error": format!("invalid JSON: {e}") });
+                ws.send_with_str(serde_json::to_string(&err).unwrap_or_default())?;
+                return Ok(());
+            }
+        };
+
+        match self.run_agent_turn(&parsed.message).await {
+            Ok(result) => {
+                ws.send_with_str(serde_json::to_string(&result).unwrap_or_default())?;
+            }
+            Err(e) => {
+                let err = serde_json::json!({ "error": e.to_string() });
+                ws.send_with_str(serde_json::to_string(&err).unwrap_or_default())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn websocket_close(
+        &self,
+        _ws: WebSocket,
+        _code: usize,
+        _reason: String,
+        _was_clean: bool,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn websocket_error(&self, _ws: WebSocket, _error: Error) -> Result<()> {
+        Ok(())
     }
 }

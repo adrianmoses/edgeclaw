@@ -1,7 +1,13 @@
 {
   "name": "edgeclaw",
   "private": true,
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
   "devDependencies": {
+    "miniflare": "^3",
+    "vitest": "^2",
     "wrangler": "^3"
   }
 }
