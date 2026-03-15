@@ -1,7 +1,11 @@
 use std::cell::Cell;
 
-use agent_core::{Agent, AgentContext, HttpBackend, LlmClient, LlmConfig, Message};
+use agent_core::{
+    Agent, AgentContext, AgentRunResult, ContentBlock, HttpBackend, LlmClient, LlmConfig, Message,
+    Role, ToolCall, ToolExecutor, ToolResult,
+};
 use serde::Deserialize;
+use skill_registry::{SkillRegistry, SkillRow};
 use worker::*;
 
 // --- HttpBackend implementation for worker::Fetch ---
@@ -125,6 +129,30 @@ async fn handle_orchestrate(mut req: Request, env: &Env) -> Result<Response> {
     Response::from_json(&results)
 }
 
+// --- Destructive tool detection (M2.8) ---
+
+const DESTRUCTIVE_PATTERNS: &[&str] = &["delete", "remove", "send", "drop"];
+
+fn is_destructive(tool_name: &str) -> bool {
+    let lower = tool_name.to_lowercase();
+    DESTRUCTIVE_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+}
+
+fn check_destructive(tool_calls: &[ToolCall]) -> (Vec<ToolCall>, Vec<ToolCall>) {
+    let mut safe = Vec::new();
+    let mut destructive = Vec::new();
+    for tc in tool_calls {
+        if is_destructive(&tc.name) {
+            destructive.push(tc.clone());
+        } else {
+            safe.push(tc.clone());
+        }
+    }
+    (safe, destructive)
+}
+
 // --- AgentDO Durable Object ---
 
 #[durable_object]
@@ -233,12 +261,11 @@ impl AgentDo {
                 };
 
                 let role = match role_str.as_str() {
-                    "user" => agent_core::Role::User,
-                    "assistant" => agent_core::Role::Assistant,
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
                     _ => return None,
                 };
-                let content: Vec<agent_core::ContentBlock> =
-                    serde_json::from_str(&content_json).ok()?;
+                let content: Vec<ContentBlock> = serde_json::from_str(&content_json).ok()?;
 
                 Some(Message {
                     role,
@@ -257,8 +284,8 @@ impl AgentDo {
         let now = js_sys::Date::now() as i64;
         for msg in messages {
             let role = match msg.role {
-                agent_core::Role::User => "user",
-                agent_core::Role::Assistant => "assistant",
+                Role::User => "user",
+                Role::Assistant => "assistant",
             };
             let content_json = serde_json::to_string(&msg.content).unwrap_or_default();
             let bindings: Vec<SqlStorageValue> = vec![
@@ -294,7 +321,150 @@ impl AgentDo {
             .unwrap_or_else(|| "You are a helpful AI assistant.".to_string())
     }
 
+    // --- Skill management ---
+
+    fn load_skills(&self) -> Vec<SkillRow> {
+        let sql = self.state.storage().sql();
+        let none: Option<Vec<SqlStorageValue>> = None;
+        let cursor = match sql.exec("SELECT name, url, tools, added_at FROM skills", none) {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        cursor
+            .raw()
+            .filter_map(|row| {
+                let values = row.ok()?;
+                let name = match &values[0] {
+                    SqlStorageValue::String(s) => s.clone(),
+                    _ => return None,
+                };
+                let url = match &values[1] {
+                    SqlStorageValue::String(s) => s.clone(),
+                    _ => return None,
+                };
+                let tools_json = match &values[2] {
+                    SqlStorageValue::String(s) => s.clone(),
+                    _ => return None,
+                };
+                let added_at = match &values[3] {
+                    SqlStorageValue::Integer(i) => *i,
+                    SqlStorageValue::Float(f) => *f as i64,
+                    _ => return None,
+                };
+
+                Some(SkillRow {
+                    name,
+                    url,
+                    tools_json,
+                    added_at,
+                })
+            })
+            .collect()
+    }
+
+    fn persist_skill(&self, row: &SkillRow) {
+        let sql = self.state.storage().sql();
+        let bindings: Vec<SqlStorageValue> = vec![
+            row.name.clone().into(),
+            row.url.clone().into(),
+            row.tools_json.clone().into(),
+            SqlStorageValue::Integer(row.added_at),
+        ];
+        let _ = sql.exec(
+            "INSERT OR REPLACE INTO skills (name, url, tools, added_at) VALUES (?, ?, ?, ?)",
+            Some(bindings),
+        );
+    }
+
+    fn build_registry(
+        &self,
+    ) -> std::result::Result<SkillRegistry<WorkerFetchBackend>, agent_core::AgentError> {
+        let rows = self.load_skills();
+        SkillRegistry::from_rows(rows, || WorkerFetchBackend)
+    }
+
+    // --- Pending approvals ---
+
+    fn persist_pending_approval(&self, tool_call: &ToolCall) {
+        let sql = self.state.storage().sql();
+        let now = js_sys::Date::now() as i64;
+        let tc_json = serde_json::to_string(tool_call).unwrap_or_default();
+        let bindings: Vec<SqlStorageValue> = vec![tc_json.into(), SqlStorageValue::Integer(now)];
+        let _ = sql.exec(
+            "INSERT INTO pending_approvals (tool_call, created_at) VALUES (?, ?)",
+            Some(bindings),
+        );
+    }
+
+    fn load_pending_approval(&self, id: i64) -> Option<ToolCall> {
+        let sql = self.state.storage().sql();
+        let cursor = sql
+            .exec(
+                "SELECT tool_call FROM pending_approvals WHERE id = ?",
+                Some(vec![SqlStorageValue::Integer(id)]),
+            )
+            .ok()?;
+
+        cursor
+            .raw()
+            .filter_map(|row| {
+                let values = row.ok()?;
+                match &values[0] {
+                    SqlStorageValue::String(s) => serde_json::from_str(s).ok(),
+                    _ => None,
+                }
+            })
+            .next()
+    }
+
+    fn delete_pending_approval(&self, id: i64) {
+        let sql = self.state.storage().sql();
+        let _ = sql.exec(
+            "DELETE FROM pending_approvals WHERE id = ?",
+            Some(vec![SqlStorageValue::Integer(id)]),
+        );
+    }
+
+    fn list_pending_approvals(&self) -> Vec<serde_json::Value> {
+        let sql = self.state.storage().sql();
+        let none: Option<Vec<SqlStorageValue>> = None;
+        let cursor = match sql.exec(
+            "SELECT id, tool_call, created_at FROM pending_approvals",
+            none,
+        ) {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        cursor
+            .raw()
+            .filter_map(|row| {
+                let values = row.ok()?;
+                let id = match &values[0] {
+                    SqlStorageValue::Integer(i) => *i,
+                    _ => return None,
+                };
+                let tool_call_json = match &values[1] {
+                    SqlStorageValue::String(s) => s.clone(),
+                    _ => return None,
+                };
+                let created_at = match &values[2] {
+                    SqlStorageValue::Integer(i) => *i,
+                    SqlStorageValue::Float(f) => *f as i64,
+                    _ => return None,
+                };
+                Some(serde_json::json!({
+                    "id": id,
+                    "tool_call": serde_json::from_str::<serde_json::Value>(&tool_call_json).ok()?,
+                    "created_at": created_at,
+                }))
+            })
+            .collect()
+    }
+
     /// Shared agent turn logic used by both HTTP and WebSocket handlers.
+    /// Now includes skill-based tool execution loop with human-in-the-loop.
     async fn run_agent_turn(&self, user_message: &str) -> Result<serde_json::Value> {
         let config = self.build_llm_config();
         let llm = LlmClient::new(config, WorkerFetchBackend);
@@ -303,18 +473,88 @@ impl AgentDo {
         let messages = self.load_messages(50);
         let system_prompt = self.load_system_prompt();
 
+        let registry = self
+            .build_registry()
+            .map_err(|e| Error::RustError(e.to_string()))?;
+        let tools = registry.all_tools();
+
         let ctx = AgentContext {
             system_prompt,
             messages,
-            tools: vec![], // Phase 1: no tools
+            tools,
         };
 
-        let result = agent
+        let mut result: AgentRunResult = agent
             .run(ctx, user_message)
             .await
             .map_err(|e| Error::RustError(e.to_string()))?;
 
+        // Persist the initial messages (user + assistant)
         self.persist_messages(&result.new_messages);
+
+        // Tool execution loop: run → execute tools → resume, until no more tool calls
+        while !result.pending_tool_calls.is_empty() {
+            let (safe_calls, destructive_calls) = check_destructive(&result.pending_tool_calls);
+
+            // Persist destructive calls as pending approvals
+            if !destructive_calls.is_empty() {
+                for tc in &destructive_calls {
+                    self.persist_pending_approval(tc);
+                }
+
+                // If ALL calls are destructive, return early awaiting approval
+                if safe_calls.is_empty() {
+                    return Ok(serde_json::json!({
+                        "status": "awaiting_approval",
+                        "answer": result.answer,
+                        "pending_approvals": destructive_calls,
+                    }));
+                }
+            }
+
+            // Execute safe tool calls via the registry
+            let mut tool_results = Vec::new();
+            for tc in &safe_calls {
+                let tr = registry.execute(tc).await.unwrap_or_else(|e| ToolResult {
+                    tool_use_id: tc.id.clone(),
+                    content: format!("Tool execution error: {e}"),
+                    is_error: true,
+                });
+                tool_results.push(tr);
+            }
+
+            // For destructive calls that were deferred, return error results so
+            // the agent knows they weren't executed
+            for tc in &destructive_calls {
+                tool_results.push(ToolResult {
+                    tool_use_id: tc.id.clone(),
+                    content: "This tool call requires human approval and is pending.".to_string(),
+                    is_error: true,
+                });
+            }
+
+            // Rebuild context and resume
+            let messages = self.load_messages(50);
+            let system_prompt = self.load_system_prompt();
+            let tools = registry.all_tools();
+
+            let ctx = AgentContext {
+                system_prompt,
+                messages,
+                tools,
+            };
+
+            let config = self.build_llm_config();
+            let llm = LlmClient::new(config, WorkerFetchBackend);
+            let agent = Agent::new(llm);
+
+            result = agent
+                .resume(ctx, tool_results)
+                .await
+                .map_err(|e| Error::RustError(e.to_string()))?;
+
+            self.persist_messages(&result.new_messages);
+        }
 
         Ok(serde_json::json!({
             "answer": result.answer,
@@ -343,6 +583,113 @@ impl AgentDo {
         self.state.accept_web_socket(&pair.server);
         Response::from_websocket(pair.client)
     }
+
+    // --- Skill management handlers ---
+
+    async fn handle_add_skill(&self, mut req: Request) -> Result<Response> {
+        #[derive(Deserialize)]
+        struct AddSkillRequest {
+            name: String,
+            url: String,
+        }
+
+        let body: AddSkillRequest = req.json().await?;
+
+        let mut registry = self
+            .build_registry()
+            .map_err(|e| Error::RustError(e.to_string()))?;
+
+        let now = js_sys::Date::now() as i64;
+        let row = registry
+            .register(body.name, body.url, WorkerFetchBackend, now)
+            .await
+            .map_err(|e| Error::RustError(e.to_string()))?;
+
+        self.persist_skill(&row);
+
+        let tools = registry.all_tools();
+        Response::from_json(&serde_json::json!({
+            "skill": row.name,
+            "tools": tools.iter()
+                .filter(|t| t.name.starts_with(&row.name))
+                .map(|t| &t.name)
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    fn handle_list_skills(&self) -> Result<Response> {
+        let rows = self.load_skills();
+        Response::from_json(&rows)
+    }
+
+    // --- Approval handlers ---
+
+    async fn handle_approve(&self, mut req: Request) -> Result<Response> {
+        #[derive(Deserialize)]
+        struct ApproveRequest {
+            id: i64,
+            #[serde(default)]
+            approve: bool,
+        }
+
+        let body: ApproveRequest = req.json().await?;
+
+        let tool_call = self
+            .load_pending_approval(body.id)
+            .ok_or_else(|| Error::RustError(format!("Pending approval {} not found", body.id)))?;
+
+        self.delete_pending_approval(body.id);
+
+        if !body.approve {
+            return Response::from_json(&serde_json::json!({
+                "status": "denied",
+                "tool_call": tool_call,
+            }))
+            .map_err(|e| Error::RustError(e.to_string()));
+        }
+
+        // Execute the approved tool call
+        let registry = self
+            .build_registry()
+            .map_err(|e| Error::RustError(e.to_string()))?;
+
+        let tool_result = registry
+            .execute(&tool_call)
+            .await
+            .unwrap_or_else(|e| ToolResult {
+                tool_use_id: tool_call.id.clone(),
+                content: format!("Tool execution error: {e}"),
+                is_error: true,
+            });
+
+        // Resume the agent with the tool result
+        let messages = self.load_messages(50);
+        let system_prompt = self.load_system_prompt();
+        let tools = registry.all_tools();
+
+        let ctx = AgentContext {
+            system_prompt,
+            messages,
+            tools,
+        };
+
+        let config = self.build_llm_config();
+        let llm = LlmClient::new(config, WorkerFetchBackend);
+        let agent = Agent::new(llm);
+
+        let result = agent
+            .resume(ctx, vec![tool_result])
+            .await
+            .map_err(|e| Error::RustError(e.to_string()))?;
+
+        self.persist_messages(&result.new_messages);
+
+        Response::from_json(&serde_json::json!({
+            "status": "approved",
+            "answer": result.answer,
+            "pending_tool_calls": result.pending_tool_calls,
+        }))
+    }
 }
 
 impl DurableObject for AgentDo {
@@ -363,6 +710,10 @@ impl DurableObject for AgentDo {
         match (method, path.as_str()) {
             (Method::Post, "/message") => self.handle_message(req).await,
             (Method::Get, "/history") => self.handle_history(),
+            (Method::Post, "/skills/add") => self.handle_add_skill(req).await,
+            (Method::Get, "/skills") => self.handle_list_skills(),
+            (Method::Post, "/approve") => self.handle_approve(req).await,
+            (Method::Get, "/approvals") => Response::from_json(&self.list_pending_approvals()),
             (Method::Get, "/") => {
                 // Check for WebSocket upgrade
                 let upgrade = req.headers().get("Upgrade").ok().flatten();
@@ -391,7 +742,28 @@ impl DurableObject for AgentDo {
             }
         };
 
-        // Parse as JSON: { "message": "..." }
+        // Try parsing as approve/deny message first
+        #[derive(Deserialize)]
+        struct WsApproval {
+            #[serde(rename = "type")]
+            msg_type: String,
+            id: i64,
+        }
+
+        if let Ok(approval) = serde_json::from_str::<WsApproval>(&text) {
+            if approval.msg_type == "approve" || approval.msg_type == "deny" {
+                let approved = approval.msg_type == "approve";
+                let result = self.handle_ws_approval(approval.id, approved).await;
+                let response = match result {
+                    Ok(val) => val,
+                    Err(e) => serde_json::json!({ "error": e.to_string() }),
+                };
+                ws.send_with_str(serde_json::to_string(&response).unwrap_or_default())?;
+                return Ok(());
+            }
+        }
+
+        // Regular message
         #[derive(Deserialize)]
         struct WsMessage {
             message: String,
@@ -408,7 +780,16 @@ impl DurableObject for AgentDo {
 
         match self.run_agent_turn(&parsed.message).await {
             Ok(result) => {
-                ws.send_with_str(serde_json::to_string(&result).unwrap_or_default())?;
+                // If awaiting approval, send approval_required event
+                if result.get("status").and_then(|v| v.as_str()) == Some("awaiting_approval") {
+                    let approval_msg = serde_json::json!({
+                        "type": "approval_required",
+                        "pending_approvals": result["pending_approvals"],
+                    });
+                    ws.send_with_str(serde_json::to_string(&approval_msg).unwrap_or_default())?;
+                } else {
+                    ws.send_with_str(serde_json::to_string(&result).unwrap_or_default())?;
+                }
             }
             Err(e) => {
                 let err = serde_json::json!({ "error": e.to_string() });
@@ -431,5 +812,64 @@ impl DurableObject for AgentDo {
 
     async fn websocket_error(&self, _ws: WebSocket, _error: Error) -> Result<()> {
         Ok(())
+    }
+}
+
+impl AgentDo {
+    async fn handle_ws_approval(&self, id: i64, approved: bool) -> Result<serde_json::Value> {
+        let tool_call = self
+            .load_pending_approval(id)
+            .ok_or_else(|| Error::RustError(format!("Pending approval {id} not found")))?;
+
+        self.delete_pending_approval(id);
+
+        if !approved {
+            return Ok(serde_json::json!({
+                "type": "approval_result",
+                "status": "denied",
+                "tool_call": tool_call,
+            }));
+        }
+
+        let registry = self
+            .build_registry()
+            .map_err(|e| Error::RustError(e.to_string()))?;
+
+        let tool_result = registry
+            .execute(&tool_call)
+            .await
+            .unwrap_or_else(|e| ToolResult {
+                tool_use_id: tool_call.id.clone(),
+                content: format!("Tool execution error: {e}"),
+                is_error: true,
+            });
+
+        let messages = self.load_messages(50);
+        let system_prompt = self.load_system_prompt();
+        let tools = registry.all_tools();
+
+        let ctx = AgentContext {
+            system_prompt,
+            messages,
+            tools,
+        };
+
+        let config = self.build_llm_config();
+        let llm = LlmClient::new(config, WorkerFetchBackend);
+        let agent = Agent::new(llm);
+
+        let result = agent
+            .resume(ctx, vec![tool_result])
+            .await
+            .map_err(|e| Error::RustError(e.to_string()))?;
+
+        self.persist_messages(&result.new_messages);
+
+        Ok(serde_json::json!({
+            "type": "approval_result",
+            "status": "approved",
+            "answer": result.answer,
+            "pending_tool_calls": result.pending_tool_calls,
+        }))
     }
 }

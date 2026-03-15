@@ -10,12 +10,19 @@ HTTP / WebSocket ──> Dispatcher Worker ──> AgentDO (Rust WASM)
                          ┌─────────┬───────────┴──────────┐
                          ▼         ▼                      ▼
                    MemorySkill  WebSearch             HttpFetch
-                   (Phase 2)   (Phase 2)             (Phase 2)
+                   (skill-memory) (skill-web-search) (skill-http-fetch)
 ```
 
-**Two-crate workspace:**
-- `crates/agent-core` — Pure Rust: ReAct agent loop, LLM client, domain types. Zero workers-rs dependency, compiles to both `wasm32-unknown-unknown` and native.
-- `crates/edgeclaw-worker` — workers-rs glue: Durable Object with SQLite persistence, HTTP dispatcher, WebSocket hibernation.
+**Workspace crates:**
+- `crates/agent-core` — Pure Rust: ReAct agent loop, LLM client, domain types, `ToolExecutor` trait. Zero workers-rs dependency.
+- `crates/mcp-client` — JSON-RPC 2.0 MCP client for connecting to skill servers.
+- `crates/skill-registry` — Namespaced tool routing (`skill:tool`), implements `ToolExecutor`.
+- `crates/edgeclaw-worker` — workers-rs glue: Durable Object with SQLite, dispatcher, WebSocket, skill management, human-in-the-loop.
+
+**Skill workers** (independent deployments in `skills/`):
+- `skills/skill-memory` — Key-value memory store with tags (Durable Object + SQLite)
+- `skills/skill-web-search` — Web search via Brave Search API
+- `skills/skill-http-fetch` — URL fetcher with HTML stripping
 
 ## Prerequisites
 
@@ -25,18 +32,99 @@ HTTP / WebSocket ──> Dispatcher Worker ──> AgentDO (Rust WASM)
 
 ## Local Development
 
-```bash
-# Set your API key
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .dev.vars
+### 1. Set up your API key
 
-# Start local dev server
+```bash
+cp .dev.vars.example .dev.vars
+# Edit .dev.vars and add your Anthropic API key
+```
+
+### 2. Start the local dev server
+
+```bash
 npx wrangler dev
+```
+
+This starts the main worker at `http://localhost:8787`.
+
+### 3. Test with curl
+
+```bash
+# Send a message
+curl -X POST http://localhost:8787/message \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: test-user" \
+  -d '{"message": "Hello, what can you do?"}'
+
+# View conversation history
+curl http://localhost:8787/history -H "X-User-Id: test-user"
+
+# List registered skills (empty initially)
+curl http://localhost:8787/skills -H "X-User-Id: test-user"
+```
+
+### 4. Register a skill (requires skill worker running)
+
+To test with skills, you need to deploy or run a skill worker first:
+
+```bash
+# In a separate terminal, run a skill worker locally
+cd skills/skill-memory
+cp ../../.dev.vars.example .dev.vars  # if needed
+npx wrangler dev --port 8788
+
+# Back in the main terminal, register the skill
+curl -X POST http://localhost:8787/skills/add \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: test-user" \
+  -d '{"name": "memory", "url": "http://localhost:8788"}'
+
+# Now messages can trigger memory tools
+curl -X POST http://localhost:8787/message \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: test-user" \
+  -d '{"message": "Remember that my favorite color is blue"}'
+```
+
+### 5. Human-in-the-loop approvals
+
+Destructive tool calls (names containing "delete", "remove", "send", "drop") require approval:
+
+```bash
+# Check pending approvals
+curl http://localhost:8787/approvals -H "X-User-Id: test-user"
+
+# Approve a pending tool call
+curl -X POST http://localhost:8787/approve \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: test-user" \
+  -d '{"id": 1, "approve": true}'
+
+# Deny a pending tool call
+curl -X POST http://localhost:8787/approve \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: test-user" \
+  -d '{"id": 1, "approve": false}'
+```
+
+### WebSocket
+
+```bash
+# Connect via WebSocket (using websocat or similar)
+websocat ws://localhost:8787/?user_id=test-user
+
+# Send messages as JSON
+{"message": "Hello"}
+
+# Approve/deny via WebSocket
+{"type": "approve", "id": 1}
+{"type": "deny", "id": 1}
 ```
 
 ## Testing
 
 ```bash
-# Rust unit tests
+# Rust unit tests (17 tests across agent-core, mcp-client, skill-registry)
 cargo test --workspace
 
 # Integration tests (requires worker build)
@@ -48,42 +136,78 @@ npm test
 
 ## Deployment
 
-```bash
-# Deploy to Cloudflare
-npx wrangler deploy
+### Main worker
 
-# Set the API key secret
+```bash
+npx wrangler deploy
 npx wrangler secret put ANTHROPIC_API_KEY
 ```
+
+### Skill workers
+
+Each skill is deployed independently from its directory:
+
+```bash
+# Memory skill
+cd skills/skill-memory && npx wrangler deploy
+
+# Web search skill (requires Brave Search API key)
+cd skills/skill-web-search && npx wrangler deploy
+npx wrangler secret put BRAVE_SEARCH_API_KEY
+
+# HTTP fetch skill
+cd skills/skill-http-fetch && npx wrangler deploy
+```
+
+After deploying skills, register them with the agent via `POST /skills/add` with the deployed Worker URL.
 
 ## API Reference
 
 All endpoints require user identity via `X-User-Id` header or `?user_id=` query param.
 
 ### POST /message
-Send a message to the agent.
+Send a message to the agent. Triggers the ReAct loop with tool execution.
 
 ```json
 // Request
 { "message": "Hello, what can you do?" }
 
-// Response
+// Response (no tools)
 { "answer": "I can help you with...", "pending_tool_calls": [] }
+
+// Response (awaiting approval for destructive tool)
+{ "status": "awaiting_approval", "answer": null, "pending_approvals": [...] }
 ```
 
 ### GET /history
 Retrieve conversation history (last 50 messages).
 
-### GET / (WebSocket Upgrade)
-Connect via WebSocket for real-time interaction. Send `Upgrade: websocket` header.
+### POST /skills/add
+Register an MCP skill server. Connects, initializes, and discovers available tools.
 
 ```json
-// Send
-{ "message": "Hello" }
+// Request
+{ "name": "memory", "url": "https://skill-memory.your-account.workers.dev" }
 
-// Receive
-{ "answer": "Hi there!", "pending_tool_calls": [] }
+// Response
+{ "skill": "memory", "tools": ["memory:memory_store", "memory:memory_retrieve", ...] }
 ```
+
+### GET /skills
+List all registered skills with their cached tool definitions.
+
+### POST /approve
+Approve or deny a pending destructive tool call.
+
+```json
+{ "id": 1, "approve": true }
+```
+
+### GET /approvals
+List all pending approval requests.
+
+### GET / (WebSocket Upgrade)
+Connect via WebSocket for real-time interaction. Send `Upgrade: websocket` header.
 
 ### POST /orchestrate
 Fan out a task to multiple named agents.
@@ -101,16 +225,27 @@ Fan out a task to multiple named agents.
 ```
 edgeclaw/
 ├── crates/
-│   ├── agent-core/src/
-│   │   ├── agent.rs      # ReAct loop (run + resume)
-│   │   ├── llm.rs        # Anthropic API client + HttpBackend trait
-│   │   ├── types.rs      # Domain types (Message, ContentBlock, ToolCall, etc.)
-│   │   └── error.rs      # AgentError enum
-│   └── edgeclaw-worker/src/
-│       └── lib.rs         # Dispatcher, AgentDO, WebSocket, orchestration
+│   ├── agent-core/src/        # Pure Rust agent library
+│   │   ├── agent.rs           # ReAct loop (run + resume)
+│   │   ├── llm.rs             # Anthropic API client + HttpBackend trait
+│   │   ├── types.rs           # Domain types + ToolExecutor trait
+│   │   └── error.rs           # AgentError enum
+│   ├── mcp-client/src/        # MCP protocol client
+│   │   ├── protocol.rs        # JSON-RPC 2.0 types
+│   │   └── client.rs          # McpClient (initialize, list_tools, call_tool)
+│   ├── skill-registry/src/    # Skill routing layer
+│   │   └── lib.rs             # SkillRegistry, SkillRow, namespaced dispatch
+│   └── edgeclaw-worker/src/   # Cloudflare Worker
+│       └── lib.rs             # Dispatcher, AgentDO, WebSocket, skills, approvals
+├── skills/
+│   ├── mcp-server-util/       # Shared JSON-RPC server helpers
+│   ├── skill-memory/          # Memory skill (DO + SQLite)
+│   ├── skill-web-search/      # Brave Search skill
+│   └── skill-http-fetch/      # URL fetch skill
 ├── tests/
-│   ├── fixtures/          # JSON fixtures for unit tests
-│   └── integration/       # Miniflare integration tests
-├── wrangler.toml          # Cloudflare Workers config
-└── CLAUDE.md              # Development conventions
+│   ├── fixtures/              # JSON fixtures for unit tests
+│   └── integration/           # Miniflare integration tests
+├── wrangler.toml              # Main worker config
+├── .dev.vars.example          # Environment variables template
+└── CLAUDE.md                  # Development conventions
 ```

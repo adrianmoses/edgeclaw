@@ -2,5 +2,11 @@
 resolver = "2"
 members = [
     "crates/agent-core",
+    "crates/mcp-client",
+    "crates/skill-registry",
     "crates/edgeclaw-worker",
+    "skills/mcp-server-util",
+    "skills/skill-memory",
+    "skills/skill-web-search",
+    "skills/skill-http-fetch",
 ]

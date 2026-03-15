@@ -19,4 +19,13 @@ pub enum AgentError {
 
     #[error("HTTP error: {0}")]
     Http(String),
+
+    #[error("Tool execution failed: {0}")]
+    ToolExecutionFailed(String),
+
+    #[error("MCP error: {0}")]
+    McpError(String),
+
+    #[error("Skill not found: {0}")]
+    SkillNotFound(String),
 }

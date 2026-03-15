@@ -75,3 +75,41 @@ describe("AgentDO", () => {
     expect(resp.webSocket).toBeTruthy();
   });
 });
+
+describe("Skills API", () => {
+  it("GET /skills returns empty array for new agent", async () => {
+    const resp = await mf.dispatchFetch("http://localhost/skills", {
+      method: "GET",
+      headers: { "X-User-Id": "skill-test-user" },
+    });
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body).toEqual([]);
+  });
+
+  it("GET /approvals returns empty array for new agent", async () => {
+    const resp = await mf.dispatchFetch("http://localhost/approvals", {
+      method: "GET",
+      headers: { "X-User-Id": "approval-test-user" },
+    });
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body).toEqual([]);
+  });
+
+  it("POST /skills/add returns error for unreachable skill URL", async () => {
+    const resp = await mf.dispatchFetch("http://localhost/skills/add", {
+      method: "POST",
+      headers: {
+        "X-User-Id": "skill-test-user-2",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "test-skill",
+        url: "http://127.0.0.1:19999",
+      }),
+    });
+    // Should fail because the skill URL is unreachable
+    expect(resp.status).toBe(500);
+  });
+});
