@@ -1,0 +1,8 @@
+# Required: Anthropic API key for the agent's LLM calls
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+
+# Optional: Override the default model (default: claude-sonnet-4-20250514)
+# CLAUDE_MODEL=claude-sonnet-4-20250514
+
+# Optional: Override Anthropic API base URL
+# ANTHROPIC_BASE_URL=https://api.anthropic.com

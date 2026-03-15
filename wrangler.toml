@@ -19,3 +19,16 @@ CLAUDE_MODEL = "claude-sonnet-4-20250514"
 # Override via .dev.vars locally or `wrangler secret put` for production:
 # ANTHROPIC_API_KEY
 # ANTHROPIC_BASE_URL (optional)
+
+# Service bindings for skill workers (requires skills to be deployed first)
+# [[services]]
+# binding = "SKILL_WEB_SEARCH"
+# service = "skill-web-search"
+#
+# [[services]]
+# binding = "SKILL_HTTP_FETCH"
+# service = "skill-http-fetch"
+#
+# [[services]]
+# binding = "SKILL_MEMORY"
+# service = "skill-memory"

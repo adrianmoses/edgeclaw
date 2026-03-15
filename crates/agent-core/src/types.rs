@@ -1,4 +1,7 @@
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+use crate::error::AgentError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -59,6 +62,11 @@ pub struct AgentContext {
     pub system_prompt: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
+}
+
+#[async_trait(?Send)]
+pub trait ToolExecutor {
+    async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

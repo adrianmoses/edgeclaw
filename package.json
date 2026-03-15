@@ -8,6 +8,6 @@
   "devDependencies": {
     "miniflare": "^3",
     "vitest": "^2",
-    "wrangler": "^3"
+    "wrangler": "^4.73.0"
   }
 }

@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+mcp-client = { path = "../mcp-client" }
+skill-registry = { path = "../skill-registry" }
 worker = { version = "0.7", features = ["http"] }  # spec says 0.5, but 0.7 required for wasm-bindgen compat
 async-trait = "0.1"
 js-sys = "0.3"
