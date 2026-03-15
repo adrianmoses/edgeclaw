@@ -144,10 +144,8 @@ async fn main(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let api_key = match env.secret("BRAVE_SEARCH_API_KEY") {
                 Ok(s) => s.to_string(),
                 Err(_) => {
-                    let result = tool_call_result(
-                        "BRAVE_SEARCH_API_KEY secret is not configured",
-                        true,
-                    );
+                    let result =
+                        tool_call_result("BRAVE_SEARCH_API_KEY secret is not configured", true);
                     return Response::from_json(&JsonRpcResponse::success(body.id, result));
                 }
             };
