@@ -10,4 +10,5 @@ members = [
     "skills/skill-web-search",
     "skills/skill-http-fetch",
     "skills/skill-schedule",
+    "crates/edgeclaw-server",
 ]
