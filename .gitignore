@@ -6,6 +6,11 @@ node_modules/
 build/
 .wrangler/
 
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+
 # Environment
 .env
 .dev.vars
