@@ -159,8 +159,8 @@ async fn auto_register_skills(pool: &SqlitePool, config: &ServerConfig) {
 
                     // Upsert into skills table
                     let result = sqlx::query(
-                        "INSERT OR REPLACE INTO skills (user_id, name, url, tools, added_at, skill_context) \
-                         VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT OR REPLACE INTO skills (user_id, name, url, tools, added_at, skill_context, auth_header_name, auth_header_value, session_id) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     )
                     .bind(user_id)
                     .bind(&row.name)
@@ -168,6 +168,9 @@ async fn auto_register_skills(pool: &SqlitePool, config: &ServerConfig) {
                     .bind(&row.tools_json)
                     .bind(row.added_at)
                     .bind(&row.skill_context)
+                    .bind(&row.auth_header_name)
+                    .bind(&row.auth_header_value)
+                    .bind(&row.session_id)
                     .execute(pool)
                     .await;
 

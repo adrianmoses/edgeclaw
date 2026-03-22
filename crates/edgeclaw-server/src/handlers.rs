@@ -121,6 +121,7 @@ pub async fn add_skill_handler(
             auth_header_name: None,
             auth_header_value: None,
             skill_context: None,
+            session_id: None,
         })
         .collect();
 
@@ -149,13 +150,16 @@ pub async fn add_skill_handler(
 
     // Persist skill
     sqlx::query(
-        "INSERT OR REPLACE INTO skills (user_id, name, url, tools, added_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO skills (user_id, name, url, tools, added_at, auth_header_name, auth_header_value, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&body.user_id)
     .bind(&row.name)
     .bind(&row.url)
     .bind(&row.tools_json)
     .bind(row.added_at)
+    .bind(&row.auth_header_name)
+    .bind(&row.auth_header_value)
+    .bind(&row.session_id)
     .execute(&state.db)
     .await
     .map_err(internal_error)?;

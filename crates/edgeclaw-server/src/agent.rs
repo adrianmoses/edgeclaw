@@ -131,8 +131,20 @@ async fn load_system_prompt(pool: &SqlitePool, user_id: &str) -> String {
 }
 
 async fn load_skills(pool: &SqlitePool, user_id: &str) -> Vec<SkillRow> {
-    let rows = sqlx::query_as::<_, (String, String, String, i64, Option<String>)>(
-        "SELECT name, url, tools, added_at, skill_context FROM skills WHERE user_id = ?",
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT name, url, tools, added_at, skill_context, auth_header_name, auth_header_value, session_id FROM skills WHERE user_id = ?",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -141,14 +153,26 @@ async fn load_skills(pool: &SqlitePool, user_id: &str) -> Vec<SkillRow> {
 
     rows.into_iter()
         .map(
-            |(name, url, tools_json, added_at, skill_context)| SkillRow {
+            |(
                 name,
                 url,
                 tools_json,
                 added_at,
-                auth_header_name: None,
-                auth_header_value: None,
                 skill_context,
+                auth_header_name,
+                auth_header_value,
+                session_id,
+            )| {
+                SkillRow {
+                    name,
+                    url,
+                    tools_json,
+                    added_at,
+                    auth_header_name,
+                    auth_header_value,
+                    skill_context,
+                    session_id,
+                }
             },
         )
         .collect()

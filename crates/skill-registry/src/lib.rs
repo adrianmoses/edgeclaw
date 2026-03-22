@@ -17,6 +17,9 @@ pub struct SkillRow {
     /// SKILL.md content injected into agent system prompt.
     #[serde(default)]
     pub skill_context: Option<String>,
+    /// MCP session ID for servers that require session tracking.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 fn build_extra_headers(
@@ -60,6 +63,9 @@ impl<H: HttpBackend> SkillRegistry<H> {
                 row.auth_header_value.as_deref(),
             );
             let client = McpClient::new(backend_factory(), row.url, extra_headers);
+            if let Some(sid) = &row.session_id {
+                client.set_session_id(sid.clone());
+            }
             skills.push(RegisteredSkill {
                 name: row.name,
                 tools,
@@ -91,6 +97,9 @@ impl<H: HttpBackend> SkillRegistry<H> {
         let tools = client.list_tools().await?;
         let tools_json = serde_json::to_string(&tools).map_err(AgentError::Serialization)?;
 
+        // Capture session ID established during initialize
+        let session_id = client.get_session_id();
+
         let row = SkillRow {
             name: name.clone(),
             url,
@@ -99,6 +108,7 @@ impl<H: HttpBackend> SkillRegistry<H> {
             auth_header_name,
             auth_header_value,
             skill_context: None,
+            session_id,
         };
 
         self.skills.push(RegisteredSkill {
@@ -249,6 +259,7 @@ mod tests {
             auth_header_name: None,
             auth_header_value: None,
             skill_context: None,
+            session_id: None,
         }];
 
         let registry = SkillRegistry::from_rows(rows, MockHttpBackend::empty).unwrap();
@@ -284,6 +295,7 @@ mod tests {
                 auth_header_name: None,
                 auth_header_value: None,
                 skill_context: None,
+                session_id: None,
             },
             SkillRow {
                 name: "http".to_string(),
@@ -293,6 +305,7 @@ mod tests {
                 auth_header_name: None,
                 auth_header_value: None,
                 skill_context: None,
+                session_id: None,
             },
         ];
 
@@ -319,6 +332,7 @@ mod tests {
             auth_header_name: None,
             auth_header_value: None,
             skill_context: None,
+            session_id: None,
         }];
 
         let registry =
@@ -407,6 +421,7 @@ mod tests {
             auth_header_name: Some("x-api-key".to_string()),
             auth_header_value: Some("secret-key-123".to_string()),
             skill_context: None,
+            session_id: None,
         }];
 
         let captured = Arc::new(Mutex::new(Vec::<Vec<(String, String)>>::new()));

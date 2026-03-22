@@ -88,6 +88,16 @@ impl<H: HttpBackend> McpClient<H> {
         }
     }
 
+    /// Set an existing session ID (e.g. restored from persistence).
+    pub fn set_session_id(&self, session_id: String) {
+        *self.session_id.lock().unwrap() = Some(session_id);
+    }
+
+    /// Get the current session ID, if any.
+    pub fn get_session_id(&self) -> Option<String> {
+        self.session_id.lock().unwrap().clone()
+    }
+
     fn next_id(&self) -> u64 {
         self.next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
