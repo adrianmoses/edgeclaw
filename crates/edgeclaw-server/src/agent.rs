@@ -11,12 +11,21 @@ use crate::server::ServerConfig;
 // --- Destructive tool detection (ported from worker) ---
 
 const DESTRUCTIVE_PATTERNS: &[&str] = &["delete", "remove", "send", "drop"];
+const DESTRUCTIVE_EXPLICIT: &[&str] = &[
+    "create_pull_request",
+    "merge_pull_request",
+    "issue_write",
+    "manage_event",
+    "create_or_update_file",
+    "push_files",
+];
 
 fn is_destructive(tool_name: &str) -> bool {
     let lower = tool_name.to_lowercase();
     DESTRUCTIVE_PATTERNS
         .iter()
         .any(|pattern| lower.contains(pattern))
+        || DESTRUCTIVE_EXPLICIT.iter().any(|name| lower.contains(name))
 }
 
 fn check_destructive(tool_calls: &[ToolCall]) -> (Vec<ToolCall>, Vec<ToolCall>) {
@@ -122,8 +131,20 @@ async fn load_system_prompt(pool: &SqlitePool, user_id: &str) -> String {
 }
 
 async fn load_skills(pool: &SqlitePool, user_id: &str) -> Vec<SkillRow> {
-    let rows = sqlx::query_as::<_, (String, String, String, i64)>(
-        "SELECT name, url, tools, added_at FROM skills WHERE user_id = ?",
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT name, url, tools, added_at, skill_context, auth_header_name, auth_header_value, session_id FROM skills WHERE user_id = ?",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -131,14 +152,29 @@ async fn load_skills(pool: &SqlitePool, user_id: &str) -> Vec<SkillRow> {
     .unwrap_or_default();
 
     rows.into_iter()
-        .map(|(name, url, tools_json, added_at)| SkillRow {
-            name,
-            url,
-            tools_json,
-            added_at,
-            auth_header_name: None,
-            auth_header_value: None,
-        })
+        .map(
+            |(
+                name,
+                url,
+                tools_json,
+                added_at,
+                skill_context,
+                auth_header_name,
+                auth_header_value,
+                session_id,
+            )| {
+                SkillRow {
+                    name,
+                    url,
+                    tools_json,
+                    added_at,
+                    auth_header_name,
+                    auth_header_value,
+                    skill_context,
+                    session_id,
+                }
+            },
+        )
         .collect()
 }
 
@@ -178,6 +214,14 @@ pub async fn run_agent_turn(
         system_prompt.push_str(hint);
     }
     let skill_rows = load_skills(pool, user_id).await;
+
+    // Inject SKILL.md context into system prompt so the agent knows how to use skills
+    for row in &skill_rows {
+        if let Some(ctx) = &row.skill_context {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(ctx);
+        }
+    }
 
     let llm_config = build_llm_config(config);
     let registry = build_registry(skill_rows)?;

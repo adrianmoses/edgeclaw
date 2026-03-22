@@ -11,6 +11,15 @@ use sqlx::SqlitePool;
 use crate::handlers;
 use crate::oauth::{OAuthFlows, ProviderConfig};
 
+/// Configuration for an auto-registered MCP skill.
+#[derive(Debug, Clone)]
+pub struct SkillAutoConfig {
+    pub name: String,
+    pub url: String,
+    /// Optional Bearer token for Authorization header (e.g. GitHub PAT).
+    pub auth_token: Option<String>,
+}
+
 pub struct ServerConfig {
     pub database_url: String,
     pub host: String,
@@ -22,6 +31,8 @@ pub struct ServerConfig {
     pub token_master_key: Option<[u8; 32]>,
     pub providers: HashMap<String, ProviderConfig>,
     pub oauth_redirect_uri: String,
+    pub skill_configs: Vec<SkillAutoConfig>,
+    pub default_user_id: String,
 }
 
 impl ServerConfig {
@@ -68,6 +79,9 @@ impl ServerConfig {
             providers: Self::load_providers(),
             oauth_redirect_uri: std::env::var("OAUTH_REDIRECT_URI")
                 .unwrap_or_else(|_| "http://localhost:8080/oauth/callback".to_string()),
+            skill_configs: Self::load_skill_configs(),
+            default_user_id: std::env::var("DEFAULT_USER_ID")
+                .unwrap_or_else(|_| "default".to_string()),
         }
     }
 
@@ -114,6 +128,35 @@ impl ServerConfig {
         providers
     }
 
+    /// Parse SKILL_*_URL env vars into auto-config entries.
+    /// e.g. SKILL_GOOGLE_WORKSPACE_URL=http://workspace-mcp:8000
+    ///      → SkillAutoConfig { name: "google_workspace", url: "http://workspace-mcp:8000" }
+    /// Also picks up SKILL_{NAME}_AUTH_TOKEN for Bearer auth (e.g. SKILL_GITHUB_AUTH_TOKEN).
+    fn load_skill_configs() -> Vec<SkillAutoConfig> {
+        // First pass: collect URLs
+        let mut configs: Vec<SkillAutoConfig> = Vec::new();
+        for (key, value) in std::env::vars() {
+            if let Some(rest) = key.strip_prefix("SKILL_") {
+                if let Some(name_upper) = rest.strip_suffix("_URL") {
+                    let name = name_upper.to_lowercase();
+                    configs.push(SkillAutoConfig {
+                        name,
+                        url: value,
+                        auth_token: None,
+                    });
+                }
+            }
+        }
+        // Second pass: attach auth tokens
+        for config in &mut configs {
+            let token_key = format!("SKILL_{}_AUTH_TOKEN", config.name.to_uppercase());
+            if let Ok(token) = std::env::var(&token_key) {
+                config.auth_token = Some(token);
+            }
+        }
+        configs
+    }
+
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
@@ -153,5 +196,7 @@ pub fn build_router(state: AppState) -> Router {
             "/credentials/import-service-account",
             post(handlers::import_service_account_handler),
         )
+        .route("/admin/skills/status", get(handlers::skill_status_handler))
+        .route("/skills/{name}", delete(handlers::remove_skill_handler))
         .with_state(state)
 }

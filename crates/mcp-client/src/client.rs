@@ -9,6 +9,8 @@ pub struct McpClient<H: HttpBackend> {
     server_url: String,
     next_id: std::sync::atomic::AtomicU64,
     extra_headers: Vec<(String, String)>,
+    /// MCP session ID returned by the server in the `mcp-session-id` response header.
+    session_id: std::sync::Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +55,28 @@ enum ToolCallContent {
     Text { text: String },
 }
 
+/// Extract JSON from a response that may be plain JSON or SSE format.
+/// SSE responses contain lines like `event: message\ndata: {...}\n\n`.
+fn extract_json_from_response(response: &str) -> &str {
+    let trimmed = response.trim();
+    // If it starts with '{', it's already plain JSON
+    if trimmed.starts_with('{') {
+        return trimmed;
+    }
+    // Otherwise look for "data: " prefix in SSE format
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if let Some(json) = line.strip_prefix("data: ") {
+            return json;
+        }
+        if let Some(json) = line.strip_prefix("data:") {
+            return json.trim();
+        }
+    }
+    // Fallback: return as-is and let JSON parsing surface the error
+    trimmed
+}
+
 impl<H: HttpBackend> McpClient<H> {
     pub fn new(backend: H, server_url: String, extra_headers: Vec<(String, String)>) -> Self {
         Self {
@@ -60,7 +84,18 @@ impl<H: HttpBackend> McpClient<H> {
             server_url,
             next_id: std::sync::atomic::AtomicU64::new(1),
             extra_headers,
+            session_id: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Set an existing session ID (e.g. restored from persistence).
+    pub fn set_session_id(&self, session_id: String) {
+        *self.session_id.lock().unwrap() = Some(session_id);
+    }
+
+    /// Get the current session ID, if any.
+    pub fn get_session_id(&self) -> Option<String> {
+        self.session_id.lock().unwrap().clone()
     }
 
     fn next_id(&self) -> u64 {
@@ -77,20 +112,36 @@ impl<H: HttpBackend> McpClient<H> {
         let body = serde_json::to_vec(&request).map_err(AgentError::Serialization)?;
 
         let url = format!("{}/mcp", self.server_url);
-        let mut headers: Vec<(&str, &str)> = vec![("content-type", "application/json")];
+        let session_id = self.session_id.lock().unwrap().clone();
+        let mut headers: Vec<(&str, &str)> = vec![
+            ("content-type", "application/json"),
+            ("accept", "application/json, text/event-stream"),
+        ];
+        if let Some(ref sid) = session_id {
+            headers.push(("mcp-session-id", sid.as_str()));
+        }
         for (k, v) in &self.extra_headers {
             headers.push((k.as_str(), v.as_str()));
         }
 
-        let response_bytes = self.backend.post(&url, &headers, &body).await?;
+        let response = self.backend.post(&url, &headers, &body).await?;
 
-        let rpc_response: JsonRpcResponse =
-            serde_json::from_slice(&response_bytes).map_err(|e| {
-                AgentError::McpError(format!(
-                    "Invalid JSON-RPC response: {e}: {}",
-                    String::from_utf8_lossy(&response_bytes)
-                ))
-            })?;
+        // Capture session ID from response headers
+        for (k, v) in &response.headers {
+            if k.eq_ignore_ascii_case("mcp-session-id") {
+                *self.session_id.lock().unwrap() = Some(v.clone());
+                break;
+            }
+        }
+
+        let response_text = String::from_utf8_lossy(&response.body);
+
+        // Extract JSON from response — may be plain JSON or SSE format (data: {...})
+        let json_str = extract_json_from_response(&response_text);
+
+        let rpc_response: JsonRpcResponse = serde_json::from_str(json_str).map_err(|e| {
+            AgentError::McpError(format!("Invalid JSON-RPC response: {e}: {}", response_text))
+        })?;
 
         if let Some(err) = rpc_response.error {
             return Err(AgentError::McpError(err.to_string()));
@@ -229,7 +280,7 @@ mod tests {
             _url: &str,
             headers: &[(&str, &str)],
             _body: &[u8],
-        ) -> Result<Vec<u8>, AgentError> {
+        ) -> Result<agent_core::llm::HttpResponse, AgentError> {
             self.captured_headers.lock().unwrap().push(
                 headers
                     .iter()
@@ -240,6 +291,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .pop_front()
+                .map(agent_core::llm::HttpResponse::body_only)
                 .ok_or_else(|| AgentError::Http("No more mock responses".to_string()))
         }
     }
@@ -315,6 +367,7 @@ mod tests {
                 "authorization".to_string(),
                 "Bearer sk-test-123".to_string(),
             )],
+            session_id: std::sync::Mutex::new(None),
         };
         client.list_tools().await.unwrap();
         let headers = captured.lock().unwrap();

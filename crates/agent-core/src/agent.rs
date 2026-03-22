@@ -217,11 +217,12 @@ mod tests {
             _url: &str,
             _headers: &[(&str, &str)],
             _body: &[u8],
-        ) -> Result<Vec<u8>, AgentError> {
+        ) -> Result<crate::llm::HttpResponse, AgentError> {
             self.responses
                 .lock()
                 .unwrap()
                 .pop_front()
+                .map(crate::llm::HttpResponse::body_only)
                 .ok_or_else(|| AgentError::Http("No more mock responses".to_string()))
         }
     }

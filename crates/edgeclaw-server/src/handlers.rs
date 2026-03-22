@@ -120,6 +120,8 @@ pub async fn add_skill_handler(
             added_at,
             auth_header_name: None,
             auth_header_value: None,
+            skill_context: None,
+            session_id: None,
         })
         .collect();
 
@@ -148,13 +150,16 @@ pub async fn add_skill_handler(
 
     // Persist skill
     sqlx::query(
-        "INSERT OR REPLACE INTO skills (user_id, name, url, tools, added_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO skills (user_id, name, url, tools, added_at, auth_header_name, auth_header_value, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&body.user_id)
     .bind(&row.name)
     .bind(&row.url)
     .bind(&row.tools_json)
     .bind(row.added_at)
+    .bind(&row.auth_header_name)
+    .bind(&row.auth_header_value)
+    .bind(&row.session_id)
     .execute(&state.db)
     .await
     .map_err(internal_error)?;
@@ -369,6 +374,75 @@ pub async fn delete_task_handler(
     }
 
     Ok(Json(serde_json::json!({ "deleted": true, "id": task_id })))
+}
+
+// --- Skill management handlers ---
+
+pub async fn skill_status_handler(
+    State(state): State<AppState>,
+    Query(params): Query<UserIdQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT name, url, tools FROM skills WHERE user_id = ?",
+    )
+    .bind(&params.user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    let mut statuses = Vec::new();
+    for (name, url, tools_json) in rows {
+        let tool_count = serde_json::from_str::<Vec<serde_json::Value>>(&tools_json)
+            .map(|v| v.len())
+            .unwrap_or(0);
+
+        // Attempt MCP initialize to verify connectivity (5s timeout)
+        let backend = ReqwestBackend::new();
+        let client = mcp_client::McpClient::new(backend, url.clone(), vec![]);
+        let status = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.initialize(),
+        )
+        .await
+        {
+            Ok(Ok(_)) => "connected".to_string(),
+            Ok(Err(e)) => format!("error: {e}"),
+            Err(_) => "error: connection timed out".to_string(),
+        };
+
+        statuses.push(serde_json::json!({
+            "name": name,
+            "url": url,
+            "status": status,
+            "tool_count": tool_count,
+        }));
+    }
+
+    Ok(Json(serde_json::json!(statuses)))
+}
+
+pub async fn remove_skill_handler(
+    State(state): State<AppState>,
+    Path(skill_name): Path<String>,
+    Query(params): Query<UserIdQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let result = sqlx::query("DELETE FROM skills WHERE user_id = ? AND name = ?")
+        .bind(&params.user_id)
+        .bind(&skill_name)
+        .execute(&state.db)
+        .await
+        .map_err(internal_error)?;
+
+    if result.rows_affected() == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "skill not found" })),
+        ));
+    }
+
+    Ok(Json(
+        serde_json::json!({ "removed": true, "name": skill_name }),
+    ))
 }
 
 // --- Service account import handler ---

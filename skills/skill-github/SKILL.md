@@ -1,125 +1,91 @@
 ---
 name: skill-github
-description: Interact with GitHub repositories, issues, and pull requests via the GitHub API. Use when the user asks about repos, issues, PRs, commits, or code on GitHub.
+description: Interact with GitHub repositories, issues, and pull requests. Use when the user asks about repos, issues, PRs, commits, or code on GitHub.
 metadata:
-  transport: api
-  provider: github
-  credential_type: oauth
-  scopes: repo user:email read:org
-  api_base: https://api.github.com
+  transport: mcp
+  mcp_server: https://api.githubcopilot.com/mcp
+  destructive_tools:
+    - issue_write
+    - create_pull_request
+    - merge_pull_request
+    - add_issue_comment
+    - create_or_update_file
+    - push_files
 ---
-
-## Authentication
-
-Requires a GitHub OAuth token obtained via the PKCE flow.
-The access token is passed as `Authorization: Bearer {token}` on every API call.
-
-GitHub OAuth App tokens do not expire. GitHub App tokens expire after 8 hours.
-All requests must include `Accept: application/vnd.github+json` and `X-GitHub-Api-Version: 2022-11-28`.
 
 ## Tools
 
-### github_list_repos
+### issue_read
 
-List repositories for the authenticated user.
+Read a single issue by owner, repo, and issue number. Returns title, body, labels, state, assignees, and comments.
 
-- **Endpoint:** `GET /user/repos`
-- **Destructive:** No
+### issue_write
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `sort` | string | no | Sort by: `created`, `updated`, `pushed`, `full_name` (default `updated`) |
-| `per_page` | integer | no | Results per page (default 30, max 100) |
-| `visibility` | string | no | Filter: `all`, `public`, `private` (default `all`) |
+Create or update an issue. **Destructive — requires approval.**
 
-### github_list_issues
+### list_issues
 
-List issues for a repository.
+List issues for a repository, with optional filters for state, labels, assignee, and pagination.
 
-- **Endpoint:** `GET /repos/{owner}/{repo}/issues`
-- **Destructive:** No
+### search_issues
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `owner` | string | yes | Repository owner |
-| `repo` | string | yes | Repository name |
-| `state` | string | no | Filter: `open`, `closed`, `all` (default `open`) |
-| `labels` | string | no | Comma-separated label names |
-| `per_page` | integer | no | Results per page (default 30) |
+Search issues and pull requests across repositories using GitHub's search syntax.
 
-### github_get_issue
+### list_pull_requests
 
-Get a single issue by number.
+List pull requests for a repository, with optional filters for state, head, base, and sort.
 
-- **Endpoint:** `GET /repos/{owner}/{repo}/issues/{number}`
-- **Destructive:** No
+### pull_request_read
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `owner` | string | yes | Repository owner |
-| `repo` | string | yes | Repository name |
-| `number` | integer | yes | Issue number |
+Read a single pull request with full details including diff stats, review status, and merge state.
 
-### github_create_issue
+### create_pull_request
 
-Create a new issue. **Destructive — requires approval.**
+Create a new pull request. **Destructive — requires approval.**
 
-- **Endpoint:** `POST /repos/{owner}/{repo}/issues`
-- **Destructive:** Yes
+### merge_pull_request
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `owner` | string | yes | Repository owner |
-| `repo` | string | yes | Repository name |
-| `title` | string | yes | Issue title |
-| `body` | string | no | Issue body (Markdown) |
-| `labels` | array of strings | no | Labels to apply |
-| `assignees` | array of strings | no | Usernames to assign |
+Merge a pull request. **Destructive — requires approval.**
 
-### github_list_prs
+### add_issue_comment
 
-List pull requests for a repository.
+Add a comment to an issue or pull request. **Destructive — requires approval.**
 
-- **Endpoint:** `GET /repos/{owner}/{repo}/pulls`
-- **Destructive:** No
+### search_code
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `owner` | string | yes | Repository owner |
-| `repo` | string | yes | Repository name |
-| `state` | string | no | Filter: `open`, `closed`, `all` (default `open`) |
-| `per_page` | integer | no | Results per page (default 30) |
+Search for code across repositories using GitHub code search syntax.
 
-### github_get_pr
+### search_repositories
 
-Get a single pull request by number.
+Search for repositories by name, description, language, or other criteria.
 
-- **Endpoint:** `GET /repos/{owner}/{repo}/pulls/{number}`
-- **Destructive:** No
+### get_file_contents
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `owner` | string | yes | Repository owner |
-| `repo` | string | yes | Repository name |
-| `number` | integer | yes | PR number |
+Get the contents of a file or directory from a repository.
 
-### github_comment_issue
+### list_commits
 
-Add a comment to an issue or PR. **Destructive — requires approval.**
+List commits for a repository, optionally filtered by path, author, or branch.
 
-- **Endpoint:** `POST /repos/{owner}/{repo}/issues/{number}/comments`
-- **Destructive:** Yes
+### create_or_update_file
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `owner` | string | yes | Repository owner |
-| `repo` | string | yes | Repository name |
-| `number` | integer | yes | Issue or PR number |
-| `body` | string | yes | Comment body (Markdown) |
+Create or update a file in a repository. **Destructive — requires approval.**
+
+### push_files
+
+Push multiple files to a repository in a single commit. **Destructive — requires approval.**
+
+### list_branches
+
+List branches for a repository.
+
+### get_me
+
+Get details about the authenticated GitHub user.
 
 ## Error Handling
 
-- **401 Unauthorized:** Token invalid or revoked. User must re-authorise via OAuth.
-- **403 Forbidden:** Insufficient scopes or secondary rate limit hit.
+- **401 Unauthorized:** Token invalid or revoked.
+- **403 Forbidden:** Insufficient scopes or rate limit exceeded.
 - **422 Unprocessable Entity:** Validation error (missing required fields, invalid values).
-- **Rate limits:** GitHub returns `X-RateLimit-Remaining` and `X-RateLimit-Reset` headers. Surface remaining quota in tool responses when below 100.
+- **Rate limits:** GitHub surfaces `X-RateLimit-Remaining` and `X-RateLimit-Reset` in responses.

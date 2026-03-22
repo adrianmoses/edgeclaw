@@ -1,0 +1,22 @@
+services:
+  edgeclaw-server:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      - SKILL_GOOGLE_WORKSPACE_URL=http://workspace-mcp:8000
+    depends_on:
+      - workspace-mcp
+    volumes:
+      - ./edgeclaw.db:/app/edgeclaw.db
+
+  workspace-mcp:
+    image: ghcr.io/taylorwilsdon/google_workspace_mcp
+    ports:
+      - "8000:8000"
+    environment:
+      - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}
+      - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET}
+      - USER_GOOGLE_EMAIL=${USER_GOOGLE_EMAIL}
+      - TOOL_TIER=core
