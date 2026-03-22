@@ -4,6 +4,22 @@ use serde::{Deserialize, Serialize};
 use crate::error::AgentError;
 use crate::types::{ContentBlock, Message, ToolDefinition};
 
+/// HTTP response with body and headers.
+#[derive(Debug, Clone)]
+pub struct HttpResponse {
+    pub body: Vec<u8>,
+    pub headers: Vec<(String, String)>,
+}
+
+impl HttpResponse {
+    pub fn body_only(body: Vec<u8>) -> Self {
+        Self {
+            body,
+            headers: vec![],
+        }
+    }
+}
+
 #[cfg(feature = "native")]
 #[async_trait]
 pub trait HttpBackend: Send + Sync {
@@ -12,7 +28,7 @@ pub trait HttpBackend: Send + Sync {
         url: &str,
         headers: &[(&str, &str)],
         body: &[u8],
-    ) -> Result<Vec<u8>, AgentError>;
+    ) -> Result<HttpResponse, AgentError>;
 }
 
 #[cfg(not(feature = "native"))]
@@ -23,7 +39,7 @@ pub trait HttpBackend {
         url: &str,
         headers: &[(&str, &str)],
         body: &[u8],
-    ) -> Result<Vec<u8>, AgentError>;
+    ) -> Result<HttpResponse, AgentError>;
 }
 
 #[derive(Debug, Clone)]
@@ -154,7 +170,8 @@ impl<H: HttpBackend> LlmClient<H> {
             ("anthropic-version", "2023-06-01"),
         ];
 
-        let response_bytes = self.backend.post(&url, &headers, &body).await?;
+        let response = self.backend.post(&url, &headers, &body).await?;
+        let response_bytes = response.body;
 
         // Try success first (has required `content` + `stop_reason` fields),
         // then fall back to error parsing. This avoids false positives from
@@ -207,7 +224,7 @@ impl HttpBackend for ReqwestBackend {
         url: &str,
         headers: &[(&str, &str)],
         body: &[u8],
-    ) -> Result<Vec<u8>, AgentError> {
+    ) -> Result<HttpResponse, AgentError> {
         let mut builder = self.client.post(url).body(body.to_vec());
         for (key, value) in headers {
             builder = builder.header(*key, *value);
@@ -216,11 +233,19 @@ impl HttpBackend for ReqwestBackend {
             .send()
             .await
             .map_err(|e| AgentError::Http(e.to_string()))?;
+        let resp_headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
         let bytes = response
             .bytes()
             .await
             .map_err(|e| AgentError::Http(e.to_string()))?;
-        Ok(bytes.to_vec())
+        Ok(HttpResponse {
+            body: bytes.to_vec(),
+            headers: resp_headers,
+        })
     }
 }
 
@@ -250,11 +275,12 @@ mod tests {
             _url: &str,
             _headers: &[(&str, &str)],
             _body: &[u8],
-        ) -> Result<Vec<u8>, AgentError> {
+        ) -> Result<HttpResponse, AgentError> {
             self.response
                 .lock()
                 .unwrap()
                 .take()
+                .map(HttpResponse::body_only)
                 .ok_or_else(|| AgentError::Http("No response".to_string()))
         }
     }

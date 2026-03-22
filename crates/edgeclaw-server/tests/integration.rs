@@ -25,6 +25,8 @@ fn test_config(mock_api_url: &str) -> ServerConfig {
         token_master_key: Some([0xAA; 32]),
         providers: HashMap::new(),
         oauth_redirect_uri: "http://localhost:8080/oauth/callback".to_string(),
+        skill_configs: vec![],
+        default_user_id: "default".to_string(),
     }
 }
 

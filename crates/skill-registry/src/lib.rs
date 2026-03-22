@@ -14,6 +14,9 @@ pub struct SkillRow {
     pub auth_header_name: Option<String>,
     #[serde(default)]
     pub auth_header_value: Option<String>,
+    /// SKILL.md content injected into agent system prompt.
+    #[serde(default)]
+    pub skill_context: Option<String>,
 }
 
 fn build_extra_headers(
@@ -95,6 +98,7 @@ impl<H: HttpBackend> SkillRegistry<H> {
             added_at: now,
             auth_header_name,
             auth_header_value,
+            skill_context: None,
         };
 
         self.skills.push(RegisteredSkill {
@@ -208,7 +212,7 @@ mod tests {
             _url: &str,
             headers: &[(&str, &str)],
             _body: &[u8],
-        ) -> Result<Vec<u8>, AgentError> {
+        ) -> Result<agent_core::llm::HttpResponse, AgentError> {
             self.captured_headers.lock().unwrap().push(
                 headers
                     .iter()
@@ -219,6 +223,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .pop_front()
+                .map(agent_core::llm::HttpResponse::body_only)
                 .ok_or_else(|| AgentError::Http("No more mock responses".to_string()))
         }
     }
@@ -243,6 +248,7 @@ mod tests {
             added_at: 1000,
             auth_header_name: None,
             auth_header_value: None,
+            skill_context: None,
         }];
 
         let registry = SkillRegistry::from_rows(rows, MockHttpBackend::empty).unwrap();
@@ -277,6 +283,7 @@ mod tests {
                 added_at: 1000,
                 auth_header_name: None,
                 auth_header_value: None,
+                skill_context: None,
             },
             SkillRow {
                 name: "http".to_string(),
@@ -285,6 +292,7 @@ mod tests {
                 added_at: 1000,
                 auth_header_name: None,
                 auth_header_value: None,
+                skill_context: None,
             },
         ];
 
@@ -310,6 +318,7 @@ mod tests {
             added_at: 1000,
             auth_header_name: None,
             auth_header_value: None,
+            skill_context: None,
         }];
 
         let registry =
@@ -397,6 +406,7 @@ mod tests {
             added_at: 1000,
             auth_header_name: Some("x-api-key".to_string()),
             auth_header_value: Some("secret-key-123".to_string()),
+            skill_context: None,
         }];
 
         let captured = Arc::new(Mutex::new(Vec::<Vec<(String, String)>>::new()));

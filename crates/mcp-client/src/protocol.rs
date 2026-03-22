@@ -24,8 +24,9 @@ impl JsonRpcRequest {
 pub struct JsonRpcResponse {
     #[allow(dead_code)]
     pub jsonrpc: String,
+    /// The id can be a number or a string (e.g. "server-error" from some servers).
     #[allow(dead_code)]
-    pub id: u64,
+    pub id: serde_json::Value,
     pub result: Option<serde_json::Value>,
     pub error: Option<JsonRpcError>,
 }
