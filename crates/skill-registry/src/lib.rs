@@ -162,9 +162,17 @@ impl<H: HttpBackend> SkillRegistry<H> {
 }
 
 /// Patterns in tool names that indicate a destructive/side-effectful action.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use agent_core::permissions::DestructivePatternPolicy instead"
+)]
 const DESTRUCTIVE_PATTERNS: &[&str] = &["delete", "remove", "send", "drop"];
 
 /// Explicit tool names known to be destructive.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use agent_core::permissions::DestructivePatternPolicy instead"
+)]
 const DESTRUCTIVE_EXPLICIT: &[&str] = &[
     "create_pull_request",
     "merge_pull_request",
@@ -175,6 +183,15 @@ const DESTRUCTIVE_EXPLICIT: &[&str] = &[
 ];
 
 /// Check if a tool name matches destructive patterns.
+///
+/// **Deprecated:** Use `agent_core::permissions::PolicyChain` instead, which
+/// provides a layered permission system (deny list → allow list → destructive
+/// patterns → default requires approval).
+#[deprecated(
+    since = "0.2.0",
+    note = "Use agent_core::permissions::PolicyChain::default_chain() instead"
+)]
+#[allow(deprecated)]
 pub fn is_destructive(tool_name: &str) -> bool {
     let lower = tool_name.to_lowercase();
     DESTRUCTIVE_PATTERNS
@@ -189,10 +206,6 @@ impl<H: HttpBackend> ToolExecutor for SkillRegistry<H> {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError> {
         self.dispatch(tool_call).await
     }
-
-    fn needs_approval(&self, tool_call: &ToolCall) -> bool {
-        is_destructive(&tool_call.name)
-    }
 }
 
 #[cfg(not(feature = "native"))]
@@ -201,10 +214,6 @@ impl<H: HttpBackend> ToolExecutor for SkillRegistry<H> {
     async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentError> {
         self.dispatch(tool_call).await
     }
-
-    fn needs_approval(&self, tool_call: &ToolCall) -> bool {
-        is_destructive(&tool_call.name)
-    }
 }
 
 #[cfg(test)]
@@ -212,6 +221,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn test_is_destructive() {
         assert!(is_destructive("gmail__send_email"));
         assert!(is_destructive("github__delete_branch"));
